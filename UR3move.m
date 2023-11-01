@@ -15,44 +15,69 @@ robot.model.plot(q,'workspace',workspace,'scale',scale); % Plot the robot
 R_down = trotx(pi/2);  % This rotates z-axis to point downwards
 
 % Simulate reaching behind to a target pose
-liftBehindPose = transl(-0.5,0.5, 0.3) * R_down;
+liftBehindPose = transl(-0.5,0.5, 0.5) * R_down;
 pickBehindPose = transl(-0.5, 0.5, 0) * R_down;
 liftForwardPose = transl(-0.5, 0.5, 0.3) * R_down; 
 frontPose = transl(-0.5, -0.4, 0.2) * R_down; 
 placePose = transl(-0.5, -0.4, 0) * R_down;
-posesSequence = {liftBehindPose, pickBehindPose, liftForwardPose, frontPose, placePose};
+originalPose = robot.model.fkine(q).T; % Fetch the initial pose from forward kinematics using initial joint angles
+posesSequence = {liftBehindPose, pickBehindPose, liftForwardPose, frontPose, placePose, originalPose};
 
-q_previous = q;
+qMatrix = q;
+deltaT = 0.05; 
+epsilon = 0.1; 
+W = diag([1 1 1 0.1 0.1 0.1]); 
 
-% Animate each step in sequence
-for k = 1:length(posesSequence)
-    targetPose = posesSequence{k};
-    initialPose = robot.model.fkine(q_previous).T;
+interpolation_steps = 20; % number of intermediate steps
 
-    % Interpolate in Cartesian space
-    numSteps = 75;
-    s = lspb(0,1,numSteps); 
+for k = 1:length(posesSequence)-1
+    T_start = robot.model.fkine(qMatrix(end,:)).T; % Use the last known position for interpolation start
 
-    intermediatePoses = zeros(4, 4, numSteps);
+    for interp_step = 1:interpolation_steps
+        alpha = interp_step / interpolation_steps;
+        T_intermediate = trinterp(T_start, posesSequence{k+1}, alpha);
 
-    for i = 1:numSteps
-        intermediatePoses(:,:,i) = initialPose + s(i) * (targetPose - initialPose);
-    end
+        T = robot.model.fkine(qMatrix(end,:)).T;
 
-    % Solve for joint configurations and animate
-    for i = 1:numSteps
-        q_now = robot.model.ikcon(intermediatePoses(:,:,i), q_previous);
-        robot.model.animate(q_now);
+        Rd = T_intermediate(1:3,1:3);
+        Ra = T(1:3,1:3);
+        Rdot = (1/deltaT)*(Rd - Ra);
+        S = Rdot*Ra';
+
+        deltaX = T_intermediate(1:3,4) - T(1:3,4);
+        linear_velocity = (1/deltaT)*deltaX;
+        angular_velocity = [S(3,2);S(1,3);S(2,1)]; 
+
+        xdot = W*[linear_velocity;angular_velocity];
+        J = robot.model.jacob0(qMatrix(end,:));
+
+        m = sqrt(det(J*J'));
+        if m < epsilon 
+            lambda = (1 - m/epsilon)*5E-2;
+        else
+            lambda = 0;
+        end
+
+        invJ = inv(J'*J + lambda *eye(6))*J'; 
+        qdot = (invJ*xdot)';
+      
+        for j = 1:6 
+            if qMatrix(end,j) + deltaT*qdot(j) < robot.model.qlim(j,1) 
+                qdot(j) = 0; 
+            elseif qMatrix(end,j) + deltaT*qdot(j) > robot.model.qlim(j,2) 
+                qdot(j) = 0; 
+            end
+        end
+
+        qMatrix = [qMatrix; qMatrix(end,:) + deltaT*qdot]; % Append the new configuration to the qMatrix
+        robot.model.animate(qMatrix(end,:));
         drawnow();
         pause(0.01);
-        q_previous = q_now;
     end
 end
 
-disp('Robot movement complete. Press enter to end.');
-pause;
 
-end
+
 
 
 
